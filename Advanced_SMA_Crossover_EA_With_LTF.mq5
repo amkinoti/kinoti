@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "2.01"
+#property version   "3.00"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -41,12 +41,19 @@ input double             BasketProfitTarget  = 100.0;           // Basket Profit
 input group "🔹 MA SETTINGS"
 input ENUM_MA_METHOD     MAType               = MODE_SMA;         // MA Type (SMA/EMA)
 input int                SMAPeriod            = 28;              // Main MA Period
-input int                TrendSMAPeriod      = 50;              // Trend Filter MA Period
-input bool               UseTrendFilter       = true;            // Use Trend Filter
+input int                TrendSMAPeriod      = 50;              // Trend Filter MA Period (DEPRECATED - using ADX now)
+input bool               UseTrendFilter       = false;           // Use Trend Filter (DEPRECATED - using ADX now)
 
 input group "🔹 LOWER TF MA SETTINGS"
 input ENUM_MA_METHOD     LowerTF_MAType        = MODE_SMA;         // Lower TF MA Type (SMA/EMA)
 input int                LowerTF_SMAPeriod     = 14;              // Lower TF MA Period
+
+input group "🔹 ADX FILTER SETTINGS"
+input bool               EnableADXFilter      = true;            // Enable ADX Trend Filter
+input int                ADXPeriod            = 14;              // ADX Period
+input double             ADXStrongTrend       = 25;              // Strong Trend Threshold (High confidence)
+input double             ADXMinTrend          = 20;              // Minimum Trend Threshold (Trade only above this)
+input bool               UseDIFilter          = true;            // Use +DI/-DI Directional Filter
 
 input group "🔹 STOP LOSS SETTINGS"
 input bool               TrailSLOnCandleClose = true;            // Trail SL on Candle Close Only
@@ -79,7 +86,7 @@ CAccountInfo      account;
 int               smaHighHandle;
 int               smaLowHandle;
 int               smaCloseHandle;
-int               trendSMAHandle;
+int               adxHandle;
 int               aoHandle;
 int               atrHandle;
 
@@ -92,7 +99,9 @@ int               lowerSmaCloseHandle;
 double            smaHighBuffer[];
 double            smaLowBuffer[];
 double            smaCloseBuffer[];
-double            trendSMABuffer[];
+double            adxBuffer[];
+double            diPlusBuffer[];
+double            diMinusBuffer[];
 double            aoBuffer[];
 double            atrBuffer[];
 
@@ -124,6 +133,12 @@ int               currentLowerTrades = 0;
 //--- Higher TF Trend Direction
 int               higherTF_Trend = 0; // 1 = uptrend, -1 = downtrend, 0 = neutral
 
+//--- ADX Values
+double            adxValue = 0;
+double            diPlusValue = 0;
+double            diMinusValue = 0;
+double            previousADXValue = 0;
+
 //--- Basket Profit Tracking
 double            basketProfit = 0.0;
 
@@ -151,8 +166,8 @@ int OnInit()
    smaLowHandle = iMA(_Symbol, ExecutionTF, SMAPeriod, 0, MAType, PRICE_LOW);
    smaCloseHandle = iMA(_Symbol, ExecutionTF, SMAPeriod, 0, MAType, PRICE_CLOSE);
    
-   if(UseTrendFilter)
-      trendSMAHandle = iMA(_Symbol, ExecutionTF, TrendSMAPeriod, 0, MAType, PRICE_CLOSE);
+   //--- Create ADX indicator (replaces trend filter)
+   adxHandle = iADX(_Symbol, ExecutionTF, ADXPeriod);
    
    aoHandle = iAO(_Symbol, ExecutionTF);
    atrHandle = iATR(_Symbol, ExecutionTF, ATRPeriod);
@@ -164,17 +179,12 @@ int OnInit()
    
    //--- Validate handles
    if(smaHighHandle == INVALID_HANDLE || smaLowHandle == INVALID_HANDLE || 
-      smaCloseHandle == INVALID_HANDLE || aoHandle == INVALID_HANDLE || 
-      atrHandle == INVALID_HANDLE || lowerSmaHighHandle == INVALID_HANDLE ||
-      lowerSmaLowHandle == INVALID_HANDLE || lowerSmaCloseHandle == INVALID_HANDLE)
+      smaCloseHandle == INVALID_HANDLE || adxHandle == INVALID_HANDLE || 
+      aoHandle == INVALID_HANDLE || atrHandle == INVALID_HANDLE || 
+      lowerSmaHighHandle == INVALID_HANDLE || lowerSmaLowHandle == INVALID_HANDLE || 
+      lowerSmaCloseHandle == INVALID_HANDLE)
    {
       Print("Error creating core indicators");
-      return(INIT_FAILED);
-   }
-   
-   if(UseTrendFilter && trendSMAHandle == INVALID_HANDLE)
-   {
-      Print("Error creating trend filter SMA");
       return(INIT_FAILED);
    }
    
@@ -182,7 +192,9 @@ int OnInit()
    ArraySetAsSeries(smaHighBuffer, true);
    ArraySetAsSeries(smaLowBuffer, true);
    ArraySetAsSeries(smaCloseBuffer, true);
-   ArraySetAsSeries(trendSMABuffer, true);
+   ArraySetAsSeries(adxBuffer, true);
+   ArraySetAsSeries(diPlusBuffer, true);
+   ArraySetAsSeries(diMinusBuffer, true);
    ArraySetAsSeries(aoBuffer, true);
    ArraySetAsSeries(atrBuffer, true);
    ArraySetAsSeries(highBuffer, true);
@@ -209,7 +221,7 @@ int OnInit()
    lastLowerBarTime = iTime(_Symbol, LowerTF, 0);
    lastStepIndexBarTime = 0;
    
-   Print("Advanced SMA Crossover EA with LTF initialized successfully");
+   Print("Advanced SMA Crossover EA with ADX Filter initialized successfully");
    return(INIT_SUCCEEDED);
 }
 
@@ -222,7 +234,7 @@ void OnDeinit(const int reason)
    if(smaHighHandle != INVALID_HANDLE) IndicatorRelease(smaHighHandle);
    if(smaLowHandle != INVALID_HANDLE) IndicatorRelease(smaLowHandle);
    if(smaCloseHandle != INVALID_HANDLE) IndicatorRelease(smaCloseHandle);
-   if(trendSMAHandle != INVALID_HANDLE) IndicatorRelease(trendSMAHandle);
+   if(adxHandle != INVALID_HANDLE) IndicatorRelease(adxHandle);
    if(aoHandle != INVALID_HANDLE) IndicatorRelease(aoHandle);
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
    if(lowerSmaHighHandle != INVALID_HANDLE) IndicatorRelease(lowerSmaHighHandle);
@@ -236,7 +248,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    //--- Check if we have enough data
-   int requiredBars = MathMax(SMAPeriod, TrendSMAPeriod) + MathMax(ATRPeriod, StructureLookback) + 10;
+   int requiredBars = MathMax(SMAPeriod, ADXPeriod) + MathMax(ATRPeriod, StructureLookback) + 10;
    if(Bars(_Symbol, ExecutionTF) < requiredBars || Bars(_Symbol, LowerTF) < requiredBars)
       return;
    
@@ -317,18 +329,23 @@ bool UpdateAllBuffers()
       CopyBuffer(smaCloseHandle, 0, 0, 3, smaCloseBuffer) < 3)
       return false;
    
+   //--- Copy ADX data (Main: ADX value, Buffer 1: +DI, Buffer 2: -DI)
+   if(CopyBuffer(adxHandle, 0, 0, 3, adxBuffer) < 3 ||
+      CopyBuffer(adxHandle, 1, 0, 3, diPlusBuffer) < 3 ||
+      CopyBuffer(adxHandle, 2, 0, 3, diMinusBuffer) < 3)
+      return false;
+   
+   //--- Update ADX values
+   previousADXValue = adxValue;
+   adxValue = adxBuffer[1];
+   diPlusValue = diPlusBuffer[1];
+   diMinusValue = diMinusBuffer[1];
+   
    //--- Copy Lower TF SMA data
    if(CopyBuffer(lowerSmaHighHandle, 0, 0, 3, lowerSmaHighBuffer) < 3 ||
       CopyBuffer(lowerSmaLowHandle, 0, 0, 3, lowerSmaLowBuffer) < 3 ||
       CopyBuffer(lowerSmaCloseHandle, 0, 0, 3, lowerSmaCloseBuffer) < 3)
       return false;
-   
-   //--- Copy trend filter data if enabled
-   if(UseTrendFilter)
-   {
-      if(CopyBuffer(trendSMAHandle, 0, 0, 3, trendSMABuffer) < 3)
-         return false;
-   }
    
    //--- Copy AO and ATR data
    if(CopyBuffer(aoHandle, 0, 0, bufferSize, aoBuffer) < bufferSize ||
@@ -774,18 +791,28 @@ void CheckLowerTFSignals()
 }
 
 //+------------------------------------------------------------------+
-//| Check buy conditions (filters)                                   |
+//| Check buy conditions with ADX Filter (replaces MA filter)         |
 //+------------------------------------------------------------------+
 bool CheckBuyConditions()
 {
-   //--- Trend filter check
-   if(UseTrendFilter)
+   //--- ADX TREND STRENGTH CHECK (replaces old Trend Filter)
+   if(EnableADXFilter)
    {
-      if(closeBuffer[1] <= trendSMABuffer[1])
+      //--- ADX too weak - don't trade in ranging markets
+      if(adxValue < ADXMinTrend)
       {
-         Print("Buy blocked: Price below trend SMA");
+         Print("Buy blocked: ADX too weak (", DoubleToString(adxValue, 2), " < ", ADXMinTrend, ") - Range-bound market");
          return false;
       }
+      
+      //--- DI DIRECTIONAL FILTER: +DI must be stronger than -DI for buy
+      if(UseDIFilter && diPlusValue <= diMinusValue)
+      {
+         Print("Buy blocked: -DI (", DoubleToString(diMinusValue, 2), ") >= +DI (", DoubleToString(diPlusValue, 2), ") - Bears stronger");
+         return false;
+      }
+      
+      Print("✓ ADX Confirmed: ADX=", DoubleToString(adxValue, 2), " +DI=", DoubleToString(diPlusValue, 2), " -DI=", DoubleToString(diMinusValue, 2));
    }
    
    //--- AO divergence filter check
@@ -830,18 +857,28 @@ bool CheckLowerBuyConditions()
 }
 
 //+------------------------------------------------------------------+
-//| Check sell conditions (filters)                                  |
+//| Check sell conditions with ADX Filter (replaces MA filter)        |
 //+------------------------------------------------------------------+
 bool CheckSellConditions()
 {
-   //--- Trend filter check
-   if(UseTrendFilter)
+   //--- ADX TREND STRENGTH CHECK (replaces old Trend Filter)
+   if(EnableADXFilter)
    {
-      if(closeBuffer[1] >= trendSMABuffer[1])
+      //--- ADX too weak - don't trade in ranging markets
+      if(adxValue < ADXMinTrend)
       {
-         Print("Sell blocked: Price above trend SMA");
+         Print("Sell blocked: ADX too weak (", DoubleToString(adxValue, 2), " < ", ADXMinTrend, ") - Range-bound market");
          return false;
       }
+      
+      //--- DI DIRECTIONAL FILTER: -DI must be stronger than +DI for sell
+      if(UseDIFilter && diMinusValue <= diPlusValue)
+      {
+         Print("Sell blocked: +DI (", DoubleToString(diPlusValue, 2), ") >= -DI (", DoubleToString(diMinusValue, 2), ") - Bulls stronger");
+         return false;
+      }
+      
+      Print("✓ ADX Confirmed: ADX=", DoubleToString(adxValue, 2), " -DI=", DoubleToString(diMinusValue, 2), " +DI=", DoubleToString(diPlusValue, 2));
    }
    
    //--- AO divergence filter check
