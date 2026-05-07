@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "2.00"
+#property version   "2.01"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -399,31 +399,31 @@ bool CanTradeStepIndex()
 //+------------------------------------------------------------------+
 void CheckAllStepIndexSignals()
 {
-   //--- Trade STEPINDEX (600)
+   //--- Trade STEPINDEX (600) - if enabled
    if(TradeStepIndex)
    {
       CheckAndTradeStepIndex("STEPINDEX", StepIndexMagicNumber);
    }
    
-   //--- Trade STEPINDEX200
+   //--- Trade STEPINDEX200 - if enabled
    if(TradeStepIndex200)
    {
       CheckAndTradeStepIndex("STEPINDEX200", StepIndex200MagicNumber);
    }
    
-   //--- Trade STEPINDEX300
+   //--- Trade STEPINDEX300 - if enabled
    if(TradeStepIndex300)
    {
       CheckAndTradeStepIndex("STEPINDEX300", StepIndex300MagicNumber);
    }
    
-   //--- Trade STEPINDEX400
+   //--- Trade STEPINDEX400 - if enabled
    if(TradeStepIndex400)
    {
       CheckAndTradeStepIndex("STEPINDEX400", StepIndex400MagicNumber);
    }
    
-   //--- Trade STEPINDEX500
+   //--- Trade STEPINDEX500 - if enabled
    if(TradeStepIndex500)
    {
       CheckAndTradeStepIndex("STEPINDEX500", StepIndex500MagicNumber);
@@ -442,20 +442,28 @@ void CheckAndTradeStepIndex(string stepSymbol, ulong stepMagic)
       return;
    }
    
-   //--- Check if we already have an OPEN position for this step index
+   //--- Check if we already have an OPEN position for THIS specific step index
+   bool hasPositionForThisSymbol = false;
+   
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(position.SelectByIndex(i))
       {
+         //--- Only check for THIS specific symbol with THIS specific magic number
          if(position.Symbol() == stepSymbol && position.Magic() == stepMagic)
          {
-            //--- Position already exists for this symbol, don't trade again
-            return;
+            hasPositionForThisSymbol = true;
+            Print("Position already exists for ", stepSymbol, " with magic ", stepMagic);
+            break; // Exit the loop since we found a position for this symbol
          }
       }
    }
    
-   //--- No position exists, open one
+   //--- If this symbol already has a position, DON'T trade it
+   if(hasPositionForThisSymbol)
+      return;
+   
+   //--- No position exists for THIS symbol, so open one
    double ask = SymbolInfoDouble(stepSymbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(stepSymbol, SYMBOL_BID);
    
